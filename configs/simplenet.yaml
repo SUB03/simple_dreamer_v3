@@ -1,0 +1,32 @@
+seed: 1
+logdir: logs
+episodesBeforeStart: 5
+grad_steps: 60000
+action_repeats: 1
+replay_ratio: 32
+batch_size: 64
+batch_length: 16
+imagination_horizon: 15
+ent_coef: 3e-5
+discount: 0.997
+gamma: 0.996996996996997
+lmbda: 0.95
+unimix: 0.01
+free_nats: 1
+betaPrior: 1.0
+betaPosterior: 0.1
+entropyScale: 0.0003
+capacity: 25000
+bins: 255
+reward_min: -20
+reward_max: 20
+
+latent_a: 32 # categories
+latent_b: 32 # classes
+
+lr: 4e-4
+b1: 0.99
+b2: 0.999
+
+recurrent_model:
+  deter_size: 256
