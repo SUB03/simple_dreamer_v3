@@ -44,7 +44,6 @@ runs/
 .ipynb_checkpoints/
 
 # Data files (adjust as needed)
-*.txt
 *.csv
 *.json
 *.pkl
