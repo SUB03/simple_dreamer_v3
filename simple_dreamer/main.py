@@ -1,6 +1,6 @@
 import argparse
 import gymnasium as gym
-import ale_py
+from gymnasium.wrappers import RecordEpisodeStatistics
 import torch as th
 from torch.utils.tensorboard import SummaryWriter
 
@@ -22,7 +22,7 @@ if __name__ == "__main__":
 
     device = "cuda" if th.cuda.is_available() else "cpu"
     env = gym.make("LunarLander-v3", max_episode_steps=1000)
-    #env = gym.make("Breakout-v4", obs_type="grayscale")
+    env = RecordEpisodeStatistics(env)
 
     encoder_type = "mlp" # cnn if image input else mlp for vecor input
     action_space = env.action_space.n
@@ -32,56 +32,69 @@ if __name__ == "__main__":
     
     dreamer = DreamerV3(config, encoder_type, obs_shape, action_space, device)
 
-    for _ in range(config.episodesBeforeStart):
+    for i in range(config.episodesBeforeStart):
         recurrent_state, latent_state, action = dreamer.init_states()
 
-        obs, _ = env.reset()
+        obs, info = env.reset()
         done = False
         while not done:
             with th.no_grad():
                 obs = th.as_tensor(obs).to(device)
-                action, recurrent_state, latent_state =\
+                recurrent_state, latent_state, action =\
                     dreamer.sample_action(obs, recurrent_state, latent_state, action)
 
-            next_obs, reward, terminated, truncated, _ = env.step(action.cpu().numpy().argmax())
+            next_obs, reward, terminated, truncated, info = env.step(action.cpu().numpy().argmax())
             done = terminated or truncated
+            if done:
+                recurrent_state, latent_state, action = dreamer.init_states()
+                print(f"episode: {i+1}, score: {info['episode']['r']}")
+
 
             dreamer.add(obs.flatten(), th.as_tensor(action), th.as_tensor(reward), done)
             obs = next_obs
         
-        env_per_grad_steps = (config.batch_size * config.batch_length\
-            * config.action_repeats) // config.replay_ratio
-        recurrent_state, latent_state, action = dreamer.init_states()
-        n_episodes = 0
-        score = 0
-        obs, _ = env.reset()
-        for grad_step in range(config.grad_steps):
-            for i in range(env_per_grad_steps):
-                with th.no_grad():
-                    obs = th.as_tensor(obs).to(device)
-                    action, recurrent_state, latent_state =\
-                        dreamer.sample_action(obs, recurrent_state, latent_state, action)
+    env_per_grad_steps = (config.batch_size * config.batch_length\
+        * config.action_repeats) // config.replay_ratio
+    recurrent_state, latent_state, action = dreamer.init_states()
+    episode_num = 0
+    obs, info = env.reset()
+    for grad_step in range(config.grad_steps):
+        # update target critic parametrs
+        if grad_step % config.critic.target_network_update_freq == 0:
+            for params, target_params in zip(
+                dreamer.critic.parameters(),
+                dreamer.target_critic.parameters()
+            ):
+                target_params.data.copy_(config.critic.tau * params.data\
+                    + (1 - config.critic.tau) * target_params.data)
+        
+        for i in range(env_per_grad_steps):
+            with th.no_grad():
+                obs = th.as_tensor(obs).to(device)
+                recurrent_state, latent_state, action =\
+                    dreamer.sample_action(obs, recurrent_state, latent_state, action)
 
-                next_obs, reward, terminated, truncated, _ = env.step(action.cpu().numpy().argmax())
-                score+=reward
-                done = terminated or truncated
-                dreamer.add(obs.flatten(), th.as_tensor(action), th.as_tensor(reward), done)
-                
-                if done:
-                    if args.record:
-                        writer.add_scalar('score', score, n_episodes)
-                    n_episodes +=1
-                    score = 0
-                    obs, _ = env.reset()
-                else:
-                    obs = next_obs
-                
-            data = dreamer.buffer.sample_batch(config.batch_size, config.batch_length)
-            loss_dict = dreamer.learn(data)
-            if args.record:
-                utils.log_losses(writer, loss_dict, grad_step)
-
+            next_obs, reward, terminated, truncated, info = env.step(action.cpu().numpy().argmax())
+            done = terminated or truncated
+            dreamer.add(obs.flatten(), th.as_tensor(action), th.as_tensor(reward), done)
+            
+            if done:
+                recurrent_state, latent_state, action = dreamer.init_states()
+                episode_score = info["episode"]["r"]
+                print(f"episode: {episode_num+1}, score: {episode_score}")
+                obs, info = env.reset()
+                if args.record:
+                    writer.add_scalar('score', episode_score, episode_num)
+                episode_num += 1
+            else:
+                obs = next_obs
+            
+        data = dreamer.buffer.sample_batch(config.batch_size, config.batch_length)
+        loss_dict = dreamer.learn(data)
         if args.record:
-            writer.close()
-        print("ended")
+            utils.log_losses(writer, loss_dict, grad_step)
+
+    if args.record:
+        writer.close()
+    print("ended")
     

@@ -14,14 +14,20 @@ class Actor(nn.Module):
         self.n_actions = n_actions
         self.latent_state_size = latent_state_size
         self.unimix = config.unimix
+
         self.actor = utils.build_network(
             num_layers=3,
             input_dim=self.latent_state_size,
             hidden_dim=256,
+            bias=False,
+            layer_norm=nn.LayerNorm,
             output_dim=n_actions
         )
+        for m in self.actor:
+            utils.init_xavier_normal(m)
 
-        self.optimizer = optim.Adam(self.parameters(), float(config.lr), betas=(config.b1, config.b2))
+        self.optimizer = optim.Adam(self.parameters(),\
+            float(config.actor.lr), eps=float(config.actor.eps)) # betas=(config.actor.b1, config.actor.b2)
     
     def _unimix(self, logits):
         if self.unimix > 0.0:
@@ -43,6 +49,6 @@ class Actor(nn.Module):
             else:
                 action = action_dist.rsample()
         else:
-            raise ValueError(self.actions_space)
+            raise RuntimeError(self.actions_space)
         
         return action, action_dist

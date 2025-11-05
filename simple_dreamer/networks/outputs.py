@@ -57,37 +57,6 @@ class BernoulliSafeMode(Bernoulli):
     def mode(self):
         mode = (self.probs > 0.5).to(self.probs)
         return mode   
-
-class OneHotDist(OneHotCategorical):
-    def __init__(self, logits=None, probs=None, unimix_ratio=0.0):
-        if logits is not None and unimix_ratio > 0.0:
-            probs = F.softmax(logits, dim=-1)
-            probs = probs * (1.0 - unimix_ratio) + unimix_ratio / probs.shape[-1]
-            logits = th.log(probs)
-            super().__init__(logits=logits, probs=None)
-        else:
-            super().__init__(logits=logits, probs=probs)
-
-    def mode(self):
-        _mode = F.one_hot(
-            th.argmax(super().logits, axis=-1), super().logits.shape[-1]
-        )
-        return _mode.detach() + super().logits - super().logits.detach()
-
-    def rsample(self, sample_shape=()):
-        sample = super().sample(sample_shape).detach()
-        probs = super().probs
-        while len(probs.shape) < len(sample.shape):
-            probs = probs[None]
-        sample += probs - probs.detach()
-        return sample
-    
-    def kl(self, other):
-        logprob = th.log_softmax(self.logits, -1)
-        logother = th.log_softmax(other.logits, -1)
-        prob = th.softmax(self.logits, -1)
-
-        return (prob * (logprob - logother)).sum(-1)
         
 class TwoHot(Output):
     def __init__(self, logits, squash=None, unsquash=None):
@@ -99,6 +68,10 @@ class TwoHot(Output):
         self.bins = th.linspace(-20, 20, steps=255, device=logits.device)
         self.squash = squash or (lambda x: x)
         self.unsquash = unsquash or (lambda x: x)
+    
+    @property
+    def mode(self):
+        return self.unsquash((self.probs * self.bins).sum(-1, keepdim=True))
     
     def pred(self) -> th.Tensor:
         # The naive implementation results in a non-zero result even if the bins

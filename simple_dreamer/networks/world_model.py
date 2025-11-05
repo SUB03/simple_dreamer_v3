@@ -16,7 +16,7 @@ class WorldModel(nn.Module):
         self.encoder_type = encoder_type
         self.unimix = config.unimix
         self.pred_weight = 1
-        self.dynamic_weight = 1
+        self.dynamic_weight = 0.5
         self.repr_weight = 0.1
         self.device = device
         self.C, self.D = config.latent_a, config.latent_b
@@ -26,7 +26,7 @@ class WorldModel(nn.Module):
         self.bins = config.bins
 
         self.encoder = nn.Sequential(
-            nn.Linear(obs_shape, 256),
+            nn.Linear(obs_shape, 256, bias=False),
             nn.LayerNorm(256, eps=1e-3),
             nn.SiLU()
         )
@@ -53,7 +53,7 @@ class WorldModel(nn.Module):
             output_dim=self.latent_shape,
             layer_norm=nn.LayerNorm,
             act=nn.SiLU,
-            bias=True
+            bias=False
         )
         for m in self.post_net:
             utils.init_xavier_normal(m)
@@ -66,7 +66,7 @@ class WorldModel(nn.Module):
             output_dim=self.latent_shape,
             layer_norm=nn.LayerNorm,
             act=nn.SiLU,
-            bias=True
+            bias=False
         )
         for m in self.prior_net:
             utils.init_xavier_normal(m)
@@ -107,8 +107,7 @@ class WorldModel(nn.Module):
 
         self.recurrent_model = GRUCell(256, self.deter_size)
 
-        self.optimizer = optim.Adam(self.parameters(), lr=float(config.lr),
-            betas=(config.b1, config.b2))
+        self.optimizer = optim.Adam(self.parameters(), lr=float(config.world_model.lr)) 
 
     def encode(self, x) -> th.Tensor:
         x = utils.symlog(x) # symlog only if using MLP, not if CNN
@@ -120,8 +119,6 @@ class WorldModel(nn.Module):
         output = self.decoder(x)
         return output
     
-    # def _continue_pred(self, x):
-    #     return outs.Binary(logit=self.continue_predictor(x))
     
     def _reward_pred(self, x):
         # if self.bins % 2 == 1:
@@ -138,40 +135,41 @@ class WorldModel(nn.Module):
 
         return outs.TwoHot(logits=logits, squash=utils.symlog, unsquash=utils.symexp)
     
-    def _unimix(self, logits):
+    def _unimix(self, logits: th.Tensor) -> th.Tensor:
+        dim = logits.dim()
+        if dim == 3:
+            logits = logits.view(*logits.shape[:-1], self.C, self.D)
+        elif dim != 4:
+            raise RuntimeError(f"The logits expected shape is 3 or 4: received a {dim}D tensor")
         if self.unimix > 0.0:
             probs = logits.softmax(dim=-1)
+            assert probs.shape[-1] == self.D, probs.shape
             uniform = th.ones_like(probs) / probs.shape[-1]
             probs = (1 - self.unimix) * probs + self.unimix * uniform
             logits = probs_to_logits(probs)
         return logits
     
-    def get_prior(self, x):
+    def get_prior(self, x: th.Tensor):
         logits = self.prior_net(x)
-        logits = logits.reshape(-1, self.C, self.D)
+        logits = logits.reshape(*logits.shape[:-1], self.C, self.D)
         logits = self._unimix(logits)
         stoch_sample = Independent(OneHotCategoricalStraightThrough(logits=logits), 1).rsample()
         logits = logits.reshape(*logits.shape[:-2], -1)
         return logits, stoch_sample 
     
-    def get_post(self, recurrent_state, embeddings):
+    def get_post(self, recurrent_state: th.Tensor, embeddings: th.Tensor):
         x = th.cat((recurrent_state, embeddings), dim=-1)
         logits = self.post_net(x)
-        logits = logits.reshape(-1, self.C, self.D)
+        logits = logits.reshape(*logits.shape[:-1], self.C, self.D)
         logits = self._unimix(logits)
         stoch_sample = Independent(OneHotCategoricalStraightThrough(logits=logits), 1).rsample()
         logits = logits.reshape(*logits.shape[:-2], -1)
         return logits, stoch_sample
     
-    def _dist(self, x):
-        #return outs.one_hot_categorical_straight_through(logits=x, unimix=0.01)
-        return outs.OneHotDist(logits=x, unimix_ratio=0.01)
-    
     def observe(self, recurrent_state: th.Tensor, post: th.Tensor, embedded_obs: th.Tensor, action: th.Tensor)\
         -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         
-        post = post.reshape(-1, self.latent_shape)
-
+        post = post.reshape(*post.shape[:-2], -1)
         feat = self.recurrent_mlp(th.cat((post, action), dim=-1))
         recurrent_state = self.recurrent_model(feat, recurrent_state)
         prior_logits, _ = self.get_prior(recurrent_state)
@@ -196,9 +194,9 @@ class WorldModel(nn.Module):
         embed = self.encode(batch.states)
 
         # initialize
-        recurrent_state = th.zeros((B, self.deter_size), dtype=th.float32, device=self.device)
-        post = th.zeros((B, self.latent_shape), dtype=th.float32, device=self.device)
-        action = th.zeros_like(batch.actions[0], dtype=th.float32, device=self.device)
+        recurrent_state = th.zeros((1, B, self.deter_size), dtype=th.float32, device=self.device)
+        post = th.zeros((1, B, self.C, self.D), dtype=th.float32, device=self.device)
+        batch_actions = th.cat((th.zeros_like(batch.actions[:1]), batch.actions[:-1]), dim=0)
 
         # store
         posts = th.empty((S, B, self.C, self.D), dtype=th.float32, device=self.device)
@@ -207,56 +205,56 @@ class WorldModel(nn.Module):
         priors_logits = th.empty((S, B, self.latent_shape), dtype=th.float32, device=self.device)
 
         for i in range(S):
-            recurrent_state, post, post_logits, prior_logits = self.observe(recurrent_state, post, embed[i], action)
+            recurrent_state, post, post_logits, prior_logits = self.observe(
+                recurrent_state,
+                post,
+                embed[i:i+1],
+                batch_actions[i:i+1]
+            )
 
-            recurrent_states[i] = recurrent_state
             posts[i] = post
+            recurrent_states[i] = recurrent_state
             posts_logits[i] = post_logits
             priors_logits[i] = prior_logits
-            action = batch.actions[i]
 
-        posts = posts.reshape(S, B, self.C * self.D)
-        full_state = th.cat((posts, recurrent_states), dim=-1)
+        full_state = th.cat((posts.view(*posts.shape[:-2], -1), recurrent_states), dim=-1)
         reward_dist = self._reward_pred(full_state)
-        #print(f"reward_prediction: {reward_dist.pred()}, true reward: {batch.rewards}")
-        reward_loss = reward_dist.loss(batch.rewards).mean()
-        #reward_loss = F.mse_loss(reward_dist.logits.squeeze(-1), utils.symlog(batch.rewards))
-
+        continue_dist = Independent(outs.BernoulliSafeMode(logits=self.continue_predictor(full_state)), 1)
         continue_targets = 1.0 - batch.dones
-        #continue_loss = self._continue_pred(full_state).loss(continue_targets).mean()
-        continue_loss = -th.mean(outs.BernoulliSafeMode(logits=self.continue_predictor(full_state))\
-            .log_prob(continue_targets.unsqueeze(-1)))
         recon_logits = self.decode(full_state)
         recon_dist = outs.SymlogDistribution(recon_logits, 1)
-        recon_loss = -recon_dist.log_prob(batch.states).mean()
 
-        posts_logits = posts_logits.reshape(-1, self.C, self.D)
-        priors_logits = priors_logits.reshape(-1, self.C, self.D)
+        self.optimizer.zero_grad(set_to_none=True)
+        reward_loss = -reward_dist.log_prob(batch.rewards)
+
+        continue_loss = -continue_dist.log_prob(continue_targets.unsqueeze(-1))
+        recon_loss = -recon_dist.log_prob(batch.states)
+
+        posts_logits = posts_logits.view(*posts_logits.shape[:-1], self.C, self.D)
+        priors_logits = priors_logits.view(*priors_logits.shape[:-1], self.C, self.D)
         dyn_loss = kl_divergence(
             Independent(OneHotCategoricalStraightThrough(logits=posts_logits.detach()), 1),
             Independent(OneHotCategoricalStraightThrough(logits=priors_logits), 1)
         )
-        rep_loss = kl_divergence(
+        repr_loss = kl_divergence(
             Independent(OneHotCategoricalStraightThrough(logits=posts_logits), 1),
             Independent(OneHotCategoricalStraightThrough(logits=priors_logits.detach()), 1)
         )
         free_nats = th.full_like(dyn_loss, 1.0)
-        dyn_loss = th.maximum(dyn_loss, free_nats).mean()
-        rep_loss = th.maximum(rep_loss, free_nats).mean()
-
-        #print(f"dyn loss shape: {dyn_loss.shape}, rep loss shape: {rep_loss.shape}, sample dyn loss: {dyn_loss[0]}")
+        dyn_loss = self.dynamic_weight * th.maximum(dyn_loss, free_nats)
+        repr_loss = self.repr_weight * th.maximum(repr_loss, free_nats)
 
         pred_loss = recon_loss + reward_loss + continue_loss
-        total_loss = self.pred_weight * pred_loss + self.dynamic_weight * dyn_loss + self.repr_weight * rep_loss
-        # print(f"total loss {total_loss.item()}, rwd_loss: {reward_loss.item()}, rec_loss: {recon_loss.item()} " +\
-        #     f"cont_loss: {continue_loss.item()}, dyn_loss: {dyn_loss.item()}, repr_loss: {rep_loss.item()}")
+        total_loss = (self.pred_weight * pred_loss + dyn_loss + repr_loss).mean()
+        # print(f"total loss {total_loss.item()}, rwd_loss: {reward_loss.mean()}, obs_loss: {recon_loss.mean()} " +\
+        #     f"cont_loss: {continue_loss.mean()}, dyn_loss: {dyn_loss.detach().mean()}, repr_loss: {repr_loss.detach().mean()}")
 
-        self.optimizer.zero_grad()
         total_loss.backward()
+        th.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
         self.optimizer.step()
 
-        return {"total_loss": total_loss.item(), "rwd_loss": reward_loss.item(), "rec_loss": recon_loss.item(),\
-            "cont_loss": continue_loss.item(), "dyn_loss": dyn_loss.item(), "repr_loss": rep_loss.item()},\
+        return {"total_loss": total_loss.item(), "rwd_loss": reward_loss.mean(), "rec_loss": recon_loss.mean(),\
+            "cont_loss": continue_loss.mean(), "dyn_loss": dyn_loss.mean(), "repr_loss": repr_loss.mean()},\
             posts, recurrent_states
 
 class GRUCell(nn.Module):
@@ -278,7 +276,6 @@ class GRUCell(nn.Module):
         return self._size
 
     def forward(self, inputs, state):
-        #state = state[0]  # Keras wraps the state in a list.
         parts = self.layers(th.cat([inputs, state], -1))
         reset, cand, update = th.split(parts, [self._size] * 3, -1)
         reset = th.sigmoid(reset)

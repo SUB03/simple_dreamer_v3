@@ -9,19 +9,25 @@ from simple_dreamer import utils
 
 class Critic(nn.Module):
     def __init__(self, config, latent_state_size):
+        super(Critic, self).__init__()
         self.config = config
         self.latent_state_size = latent_state_size
-        super(Critic, self).__init__()
+        
         self.critic = utils.build_network(
-            num_layers=3,
+            num_layers=config.num_layers,
             input_dim=latent_state_size,
-            hidden_dim=256,
+            hidden_dim=config.hidden_dim,
             output_dim=config.bins,
             layer_norm=nn.LayerNorm,
             bias=False
         )
 
-        self.optimizer = optim.Adam(self.parameters(), float(config.lr), betas=(config.b1, config.b2))
+        for m in self.critic:
+            utils.init_xavier_normal(m)
+        utils.init_zero(self.critic[-1])
+
+        self.optimizer = optim.Adam(self.parameters(),\
+            float(config.lr), betas=(config.b1, config.b2))
     
     def forward(self, x):
         return self.critic(x)

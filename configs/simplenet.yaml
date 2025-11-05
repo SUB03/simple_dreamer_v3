@@ -1,22 +1,21 @@
+# training
 seed: 1
-logdir: logs
+logdir: runs
 episodesBeforeStart: 5
 grad_steps: 60000
-action_repeats: 1
 replay_ratio: 32
+action_repeats: 1
 batch_size: 64
 batch_length: 16
+capacity: 25000
+
 imagination_horizon: 15
-ent_coef: 3e-5
 discount: 0.997
 gamma: 0.996996996996997
 lmbda: 0.95
 unimix: 0.01
 free_nats: 1
-betaPrior: 1.0
-betaPosterior: 0.1
 entropyScale: 0.0003
-capacity: 25000
 bins: 255
 reward_min: -20
 reward_max: 20
@@ -24,9 +23,36 @@ reward_max: 20
 latent_a: 32 # categories
 latent_b: 32 # classes
 
-lr: 4e-4
-b1: 0.99
-b2: 0.999
-
 recurrent_model:
   deter_size: 256
+
+world_model:
+
+  # optimizer
+  lr: 1e-5
+  b1: 0.99
+  b2: 0.999
+
+actor:
+  num_layers: 2
+  hidden_dim: 256
+
+  ent_coef: 3e-4
+
+  # optimizer 
+  eps: 1e-5
+  lr: 4e-5
+  b1: 0.99
+  b2: 0.999
+
+critic:
+  num_layers: 2
+  hidden_dim: 256
+  bins: 255
+  target_network_update_freq: 1
+  tau: 0.02
+
+  # optimizer
+  lr: 1e-5
+  b1: 0.99
+  b2: 0.999

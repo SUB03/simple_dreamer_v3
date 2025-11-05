@@ -82,11 +82,15 @@ def build_network(
     return nn.Sequential(*layers)
 
 class Normalize(nn.Module):
-    def __init__(self, smoothing = 0.99):
+    def __init__(self,
+        smoothing = 0.99,
+        perc_low = 0.05,
+        perc_high = 0.95,
+    ):
         super(Normalize, self).__init__()
         self.smoothing = smoothing
-        self.perc_low = 0.05
-        self.perc_high = 0.95
+        self.perc_low = perc_low
+        self.perc_high = perc_high
         self.register_buffer("low", th.zeros((), dtype=th.float32))
         self.register_buffer("high", th.zeros((), dtype=th.float32))
 
@@ -95,6 +99,7 @@ class Normalize(nn.Module):
         low = th.quantile(x, self.perc_low)
         high = th.quantile(x, self.perc_high)
         self.low = self.smoothing * self.low + (1 - self.smoothing) * low
-        self.high = self.smoothing * self.high + (1 -self.smoothing) * high
-        invscale = th.max(th.tensor(1e-8), self.high - self.low)
+        self.high = self.smoothing * self.high + (1 - self.smoothing) * high
+        invscale = th.max(th.tensor(1.0), self.high - self.low)
         return self.low.detach(), invscale.detach()
+8
