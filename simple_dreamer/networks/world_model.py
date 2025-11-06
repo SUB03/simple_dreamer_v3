@@ -9,6 +9,8 @@ from torch.distributions.utils import probs_to_logits
 from simple_dreamer import utils
 import simple_dreamer.networks.outputs as outs
 
+from typing import Sequence
+
 class WorldModel(nn.Module):
     def __init__(self, config, encoder_type, obs_shape, n_actions, device):
         super(WorldModel, self).__init__()
@@ -107,7 +109,16 @@ class WorldModel(nn.Module):
 
         self.recurrent_model = GRUCell(256, self.deter_size)
 
-        self.optimizer = optim.Adam(self.parameters(), lr=float(config.world_model.lr)) 
+        self.optimizer = optim.Adam(self.parameters(), lr=float(config.world_model.lr))
+    
+    def get_initial_states(self, batch_shape: Sequence[int | th.Size]\
+    ) -> tuple[th.Tensor, th.Tensor]:
+
+        recurrent_state = th.zeros((1, 1, self.config.recurrent_model.deter_size),\
+            dtype=th.float32, device=self.device).expand(*batch_shape, -1)
+        # NOTE: sheeprl code uses prior network to get initial posterior kek
+        _, latent_state = self.get_prior(recurrent_state, sample=False)
+        return recurrent_state, latent_state
 
     def encode(self, x) -> th.Tensor:
         x = utils.symlog(x) # symlog only if using MLP, not if CNN
@@ -118,7 +129,6 @@ class WorldModel(nn.Module):
     def decode(self, x, unsquash=None):
         output = self.decoder(x)
         return output
-    
     
     def _reward_pred(self, x):
         # if self.bins % 2 == 1:
@@ -149,13 +159,16 @@ class WorldModel(nn.Module):
             logits = probs_to_logits(probs)
         return logits
     
-    def get_prior(self, x: th.Tensor):
+    def get_prior(self, x: th.Tensor, sample=True):
         logits = self.prior_net(x)
         logits = logits.reshape(*logits.shape[:-1], self.C, self.D)
         logits = self._unimix(logits)
-        stoch_sample = Independent(OneHotCategoricalStraightThrough(logits=logits), 1).rsample()
+        if sample:
+            stoch = Independent(OneHotCategoricalStraightThrough(logits=logits), 1).rsample()
+        else:
+            stoch = Independent(OneHotCategoricalStraightThrough(logits=logits), 1).mode
         logits = logits.reshape(*logits.shape[:-2], -1)
-        return logits, stoch_sample 
+        return logits, stoch
     
     def get_post(self, recurrent_state: th.Tensor, embeddings: th.Tensor):
         x = th.cat((recurrent_state, embeddings), dim=-1)
@@ -166,10 +179,19 @@ class WorldModel(nn.Module):
         logits = logits.reshape(*logits.shape[:-2], -1)
         return logits, stoch_sample
     
-    def observe(self, recurrent_state: th.Tensor, post: th.Tensor, embedded_obs: th.Tensor, action: th.Tensor)\
-        -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        
+    def observe(self, recurrent_state: th.Tensor,
+        post: th.Tensor,
+        embedded_obs: th.Tensor,
+        action: th.Tensor,
+        is_first: th.Tensor
+    ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+
+        action = (1 - is_first) * action
+        initial_recurrent_state, initial_post = self.get_initial_states(recurrent_state.shape[:2])
+        recurrent_state = (1 - is_first) * recurrent_state + is_first * initial_recurrent_state
         post = post.reshape(*post.shape[:-2], -1)
+        post = (1 - is_first) * post + is_first * initial_post.view_as(post)
+
         feat = self.recurrent_mlp(th.cat((post, action), dim=-1))
         recurrent_state = self.recurrent_model(feat, recurrent_state)
         prior_logits, _ = self.get_prior(recurrent_state)
@@ -197,6 +219,7 @@ class WorldModel(nn.Module):
         recurrent_state = th.zeros((1, B, self.deter_size), dtype=th.float32, device=self.device)
         post = th.zeros((1, B, self.C, self.D), dtype=th.float32, device=self.device)
         batch_actions = th.cat((th.zeros_like(batch.actions[:1]), batch.actions[:-1]), dim=0)
+        batch.is_first[0, :] = th.ones_like(batch.is_first[0, :])
 
         # store
         posts = th.empty((S, B, self.C, self.D), dtype=th.float32, device=self.device)
@@ -209,7 +232,8 @@ class WorldModel(nn.Module):
                 recurrent_state,
                 post,
                 embed[i:i+1],
-                batch_actions[i:i+1]
+                batch_actions[i:i+1],
+                batch.is_first[i:i+1]
             )
 
             posts[i] = post
@@ -227,7 +251,7 @@ class WorldModel(nn.Module):
         self.optimizer.zero_grad(set_to_none=True)
         reward_loss = -reward_dist.log_prob(batch.rewards)
 
-        continue_loss = -continue_dist.log_prob(continue_targets.unsqueeze(-1))
+        continue_loss = -continue_dist.log_prob(continue_targets)
         recon_loss = -recon_dist.log_prob(batch.states)
 
         posts_logits = posts_logits.view(*posts_logits.shape[:-1], self.C, self.D)

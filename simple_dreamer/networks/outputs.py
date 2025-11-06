@@ -54,6 +54,7 @@ class BernoulliSafeMode(Bernoulli):
     def __init__(self, probs=None, logits=None, validate_args=None):
         super().__init__(probs, logits, validate_args)
 
+    @property
     def mode(self):
         mode = (self.probs > 0.5).to(self.probs)
         return mode   
@@ -116,10 +117,11 @@ class TwoHot(Output):
         weight_above = dist_to_below / total
         target = (
             F.one_hot(below, len(self.bins)) * weight_below[..., None] +
-            F.one_hot(above, len(self.bins)) * weight_above[..., None])
+            F.one_hot(above, len(self.bins)) * weight_above[..., None]
+        ).squeeze(-2)
         log_pred = F.log_softmax(self.logits, dim=-1)
 
-        return (target * log_pred).sum(-1)
+        return (log_pred * target).sum(-1)
     
 class SymlogDistribution:
     def __init__(

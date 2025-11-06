@@ -1,7 +1,7 @@
 # training
-seed: 1
+seed: 42
 logdir: runs
-episodesBeforeStart: 5
+episodes_before_start: 10
 grad_steps: 60000
 replay_ratio: 32
 action_repeats: 1
@@ -29,7 +29,7 @@ recurrent_model:
 world_model:
 
   # optimizer
-  lr: 1e-5
+  lr: 1e-4
   b1: 0.99
   b2: 0.999
 
@@ -37,11 +37,11 @@ actor:
   num_layers: 2
   hidden_dim: 256
 
-  ent_coef: 3e-4
+  ent_coef: 3e-4 # 3e-4
 
   # optimizer 
   eps: 1e-5
-  lr: 4e-5
+  lr: 8e-5 # 8e-5
   b1: 0.99
   b2: 0.999
 
@@ -53,6 +53,6 @@ critic:
   tau: 0.02
 
   # optimizer
-  lr: 1e-5
+  lr: 8e-5 # 8e-5
   b1: 0.99
   b2: 0.999

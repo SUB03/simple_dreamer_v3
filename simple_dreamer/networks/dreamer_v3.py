@@ -10,7 +10,7 @@ import simple_dreamer.networks.outputs as outs
 from simple_dreamer.networks.actor import Actor
 from simple_dreamer.networks.critic import Critic
 from simple_dreamer.networks.world_model import WorldModel
-from simple_dreamer.TrajectoryBuffer import TrajectoryBuffer
+from simple_dreamer.replay_buffer import ReplayBuffer
 
 class DreamerV3:
     def __init__(self, config, encoder_type, obs_shape, n_actions, device):
@@ -33,14 +33,13 @@ class DreamerV3:
         self.actor = Actor(config, self.full_state_size, action_space="discrete", n_actions=n_actions).to(device)
         self.critic = Critic(config.critic, self.full_state_size).to(device)
         self.target_critic = copy.deepcopy(self.critic)
-        self.buffer = TrajectoryBuffer(config, self.obs_shape, n_actions, device)
+        self.buffer = ReplayBuffer(config, self.obs_shape, n_actions, device)
 
         self.ema = utils.Normalize()
 
         print(self.world_model)
         print(self.actor)
         print(self.critic)
-        print(self.target_critic)
 
         self.device = device
         self.config = config
@@ -48,8 +47,8 @@ class DreamerV3:
         self.batch_size = config.batch_size
         self.batch_length = config.batch_length
     
-    def add(self, obs, action, reward, done):
-        self.buffer.add(obs, action, reward, done)
+    def add(self, obs, action, reward, done, is_first):
+        self.buffer.add(obs, action, reward, done, is_first)
 
     def compute_lambda_values(self, rewards, values, continues, lmbda=0.95):
         vals = [values[-1:]]
@@ -93,10 +92,9 @@ class DreamerV3:
             actions = self.actor(imagined_latent_state.detach())[0]
             imagined_actions[i] = actions
 
-        #predicted_values = outs.TwoHot(self.critic(imagined_trajectories)).pred().unsqueeze(-1)
         predicted_values = outs.TwoHot(self.critic(imagined_trajectories)).mode
-        predicted_rewards = outs.TwoHot(self.world_model.reward_predictor(imagined_trajectories)).pred().unsqueeze(-1)
-        continues = outs.BernoulliSafeMode(logits=self.world_model.continue_predictor(imagined_trajectories)).mode()
+        predicted_rewards = outs.TwoHot(self.world_model.reward_predictor(imagined_trajectories)).mode
+        continues = outs.BernoulliSafeMode(logits=self.world_model.continue_predictor(imagined_trajectories)).mode
         true_continues = (1 - batch.dones).flatten().reshape(1, -1, 1)
         continues = th.cat((true_continues, continues[1:]))
 
@@ -106,12 +104,6 @@ class DreamerV3:
             continues[1:] * self.config.gamma,
             lmbda=self.config.lmbda
         )
-        # print(self.config.gamma, self.config.lmbda)
-        # print(f"predicted_rewards {predicted_rewards[0]}")
-        # print(f"predicted_values {predicted_values[0]}")
-        # print(f"continues {continues[0]}")
-        # print(f"lambda_values {lambda_values[0]}")
-
         with th.no_grad():
             discount = th.cumprod(continues * self.config.gamma, dim=0) / self.config.gamma
         
@@ -123,11 +115,7 @@ class DreamerV3:
         normed_lambda_values = (lambda_values - offset) / invscale
         normed_baseline = (baseline - offset) / invscale
         advantage = normed_lambda_values - normed_baseline
-        # print(f"offset: {offset}, invscale: {invscale}")
-        # # print(f"baseline: {baseline[0]}")
-        # # print(f"lambda_values: {lambda_values[0]}")
-        # print(f"normed_baseline: {normed_baseline[0]}")
-        # print(f"normed_lambda_values: {normed_lambda_values[0]}")
+
         if self.is_continuous:
             objective = advantage
             raise NotImplementedError(self.is_continuous)
@@ -143,15 +131,8 @@ class DreamerV3:
             objective = policy_dist.log_prob(imagined_actions.detach()).unsqueeze(-1)[:-1]\
                 * advantage.detach()
         
-        # print(policy_dist.log_prob(imagined_actions.detach()).unsqueeze(-1).shape)
-        # print(policy_dist.log_prob(imagined_actions.detach()).unsqueeze(-1)[0])
-        # print(f"advantage: {advantage[:2]}")
-        # print(f"objective: {objective[:2]}")
-        # raise
-        # entropy = self.config.ent_coef * th.stack([p.entropy() for p in policy_dist]).sum(-1)
         entropy = float(self.config.actor.ent_coef) * policy_dist.entropy()
         actor_loss = -th.mean(discount[:-1].detach() * (objective + entropy.unsqueeze(-1)[:-1]))
-        #TODO: add optional gradient clipping
         actor_loss.backward()
         self.actor.optimizer.step()
 
@@ -165,9 +146,8 @@ class DreamerV3:
         value_loss = value_loss - qv_dist.log_prob(tv.detach().squeeze(-1))
         value_loss = th.mean(value_loss * discount[:-1].squeeze(-1))
         value_loss.backward()
-        # add optional gradient clipping
         self.critic.optimizer.step()
-        print(f"policy_loss, value_loss: {actor_loss.item(), value_loss.item()}")
+        # print(f"policy_loss, {actor_loss.item()}, value_loss: {value_loss.item()}, entropy: {entropy.mean().item()}")
         loss.update({
             "policy_loss": actor_loss.item(),
             "value_loss": value_loss.item(),
@@ -176,12 +156,11 @@ class DreamerV3:
 
         return loss
     
-    def init_states(self):
-        recurrent_state = th.zeros((1, 1, self.config.recurrent_model.deter_size),\
-            dtype=th.float32, device=self.device) 
-        latent_state = th.zeros((1, 1, self.latent_size), dtype=th.float32,\
-            device=self.device)
+    @th.no_grad()
+    def init_states(self, num_envs):
         action = th.zeros((1, 1, self.n_actions), dtype=th.float32, device=self.device)
+        recurrent_state, latent_state = self.world_model.get_initial_states((1, num_envs))
+        latent_state = latent_state.reshape(*latent_state.shape[:-2], -1)
         return recurrent_state, latent_state, action
     
     def sample_action(self, obs, recurrent_state, latent_state, action)\
