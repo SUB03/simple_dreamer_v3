@@ -51,12 +51,33 @@ class DreamerV3:
         self.buffer.add(obs, action, reward, done, is_first)
 
     def compute_lambda_values(self, rewards, values, continues, lmbda=0.95):
-        vals = [values[-1:]]
-        interm = rewards + continues * values * (1 - lmbda)
-        for t in reversed(range(len(continues))):
-            vals.append(interm[t] + continues[t] * lmbda * vals[-1])
-
-        return th.cat(list(reversed(vals))[:-1])
+        """Compute lambda returns using TD(lambda) algorithm.
+        
+        Args:
+            rewards: Predicted rewards [T, B, 1]
+            values: Predicted values [T, B, 1]
+            continues: Continue flags [T, B, 1]
+            lmbda: Lambda parameter for TD(lambda)
+        
+        Returns:
+            Lambda returns [T, B, 1]
+        """
+        # Start with bootstrap value
+        next_value = values[-1]
+        returns = []
+        
+        # Iterate backwards through time
+        for t in reversed(range(len(rewards))):
+            # TD error
+            td_target = rewards[t] + continues[t] * self.config.gamma * next_value
+            # Lambda return
+            lambda_return = td_target + continues[t] * self.config.gamma * lmbda * (next_value - values[t])
+            returns.append(lambda_return)
+            next_value = lambda_return
+        
+        # Reverse to get correct temporal order
+        returns = th.stack(list(reversed(returns)), dim=0)
+        return returns
     
     def learn(self, batch):
         # world model learning
@@ -108,32 +129,25 @@ class DreamerV3:
             discount = th.cumprod(continues * self.config.gamma, dim=0) / self.config.gamma
         
         self.actor.optimizer.zero_grad(set_to_none=True)
-        _, policy_dist = self.actor.forward(imagined_trajectories.detach())
+        _, policy_dist = self.actor.forward(imagined_trajectories[:-1].detach())
 
         baseline = predicted_values[:-1]
         offset, invscale = self.ema(lambda_values)
         normed_lambda_values = (lambda_values - offset) / invscale
         normed_baseline = (baseline - offset) / invscale
-        advantage = normed_lambda_values - normed_baseline
+        advantage = (normed_lambda_values - normed_baseline).detach()
 
         if self.is_continuous:
             objective = advantage
             raise NotImplementedError(self.is_continuous)
         else:
-            # objective = th.stack(
-            #     [
-            #         policy.log_prob(imagined_action.detach()).unsqueeze(-1)[:-1]
-            #         for policy, imagined_action in zip(policy_dist, th.split(imagined_actions, (self.n_actions, ), dim=-1))
-            #     ],
-            #     dim=-1
-            # ).sum(-1) * advantage.detach()
+            # For discrete actions, compute log probability of taken actions
+            objective = policy_dist.log_prob(imagined_actions[:-1].detach()).unsqueeze(-1) * advantage
         
-            objective = policy_dist.log_prob(imagined_actions.detach()).unsqueeze(-1)[:-1]\
-                * advantage.detach()
-        
-        entropy = float(self.config.actor.ent_coef) * policy_dist.entropy()
-        actor_loss = -th.mean(discount[:-1].detach() * (objective + entropy.unsqueeze(-1)[:-1]))
+        entropy = policy_dist.entropy().unsqueeze(-1)
+        actor_loss = -th.mean(discount[:-1].detach() * (objective + float(self.config.actor.ent_coef) * entropy))
         actor_loss.backward()
+        th.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=100.0)
         self.actor.optimizer.step()
 
         qv_dist = outs.TwoHot(self.critic(imagined_trajectories.detach()[:-1]),\
@@ -143,9 +157,9 @@ class DreamerV3:
 
         self.critic.optimizer.zero_grad(set_to_none=True)
         value_loss = -qv_dist.log_prob(lambda_values.detach().squeeze(-1))
-        value_loss = value_loss - qv_dist.log_prob(tv.detach().squeeze(-1))
         value_loss = th.mean(value_loss * discount[:-1].squeeze(-1))
         value_loss.backward()
+        th.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=100.0)
         self.critic.optimizer.step()
         # print(f"policy_loss, {actor_loss.item()}, value_loss: {value_loss.item()}, entropy: {entropy.mean().item()}")
         loss.update({
