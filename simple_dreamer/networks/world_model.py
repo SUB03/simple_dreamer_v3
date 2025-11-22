@@ -121,8 +121,9 @@ class WorldModel(nn.Module):
         return recurrent_state, latent_state
 
     def encode(self, x) -> th.Tensor:
-        x = utils.symlog(x) # symlog only if using MLP, not if CNN
-
+        # For Lunar Lander, observations are already well-scaled
+        # Use milder transformation than symlog
+        x = x / 10.0  # Gentle normalization
         logits = self.encoder(x)
         return logits
     
@@ -219,7 +220,6 @@ class WorldModel(nn.Module):
         recurrent_state = th.zeros((1, B, self.deter_size), dtype=th.float32, device=self.device)
         post = th.zeros((1, B, self.C, self.D), dtype=th.float32, device=self.device)
         batch_actions = th.cat((th.zeros_like(batch.actions[:1]), batch.actions[:-1]), dim=0)
-        batch.is_first[0, :] = th.ones_like(batch.is_first[0, :])
 
         # store
         posts = th.empty((S, B, self.C, self.D), dtype=th.float32, device=self.device)

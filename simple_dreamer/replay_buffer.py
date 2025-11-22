@@ -21,10 +21,11 @@ class ReplayBuffer:
         self.action_space = action_space
 
         self.states = th.empty((self.capacity, self.obs_shape), dtype=th.float32, device=self.device)
+        # For discrete actions, store action index (1,) instead of one-hot (action_space,)
         self.actions = th.empty((self.capacity, self.action_space), dtype=th.float32, device=self.device)
-        self.rewards = th.empty(self.capacity, dtype=th.float32, device=self.device)
-        self.dones = th.empty(self.capacity, dtype=th.int8, device=self.device)
-        self.is_first = th.empty(self.capacity, dtype=th.int8, device=self.device)
+        self.rewards = th.empty((self.capacity, 1), dtype=th.float32, device=self.device)
+        self.dones = th.empty((self.capacity, 1), dtype=th.float32, device=self.device)
+        self.is_first = th.empty((self.capacity, 1), dtype=th.float32, device=self.device)
 
         self.online_queue = deque(maxlen=self.capacity) # stores indices of recent transitions
         self.ptr = 0
@@ -44,41 +45,38 @@ class ReplayBuffer:
             self.full = True
     
     def sample(self, batch_length, batch_size):
-        """each minibatch is formed first from non-overlapping online trajectories and then filled
-            up with uniformly sampled trajectories from the replay buffer. """
+        """Sample sequences from the replay buffer.
         
+        Samples batch_size sequences of length batch_length.
+        Start indices are sampled uniformly, ensuring sequences don't wrap around.
+        """
         max_idx = self.capacity if self.full else self.ptr
-        if max_idx < batch_length * batch_size:
-            print(max_idx)
-            return
+        if max_idx < batch_length:
+            print(f"Buffer too small: {max_idx} < {batch_length}")
+            return None
         
-        online_indices = []
-        num_online = min(batch_length * batch_size, len(self.online_queue))
-        for _ in range(num_online):
-            online_indices.append(self.online_queue.popleft())
+        # Sample start indices for sequences
+        # Ensure we don't sample indices that would cause wrap-around
+        max_start_idx = max_idx - batch_length
+        if max_start_idx <= 0:
+            return None
+            
+        start_indices = th.randint(0, max_start_idx, (batch_size,), device=self.device)
         
-        remaining_needed = batch_length * batch_size - len(online_indices)
-
-        uniform_indices = []
-        if remaining_needed > 0:
-            if self.full:
-                uniform_indices = th.randint(0, self.capacity, (remaining_needed, ), device=self.device)
-            else:
-                uniform_indices = th.randint(0, self.ptr, (remaining_needed, ), device=self.device)
-            uniform_indices = uniform_indices.tolist()
-
-        idx = online_indices + uniform_indices
-
-        states = self.states[idx]
-        actions = self.actions[idx]
-        rewards = self.rewards[idx]
-        dones = self.dones[idx]
-        is_first = self.is_first[idx]
+        # Create sequence indices
+        batch_indices = start_indices.unsqueeze(1) + th.arange(batch_length, device=self.device).unsqueeze(0)
+        batch_indices = batch_indices.flatten()
+        
+        states = self.states[batch_indices].reshape(batch_length, batch_size, -1)
+        actions = self.actions[batch_indices].reshape(batch_length, batch_size, -1)
+        rewards = self.rewards[batch_indices].reshape(batch_length, batch_size, -1)
+        dones = self.dones[batch_indices].reshape(batch_length, batch_size, -1)
+        is_first = self.is_first[batch_indices].reshape(batch_length, batch_size, -1)
 
         return RolloutBufferSamples(
-            states.reshape(batch_length, batch_size, -1),
-            actions.reshape(batch_length, batch_size, -1),
-            rewards.reshape(batch_length, batch_size, -1),
-            dones.reshape(batch_length, batch_size, -1),
-            is_first.reshape(batch_length, batch_size, -1)
+            states,
+            actions,
+            rewards,
+            dones,
+            is_first
         )

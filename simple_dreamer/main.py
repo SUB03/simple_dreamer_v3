@@ -55,7 +55,7 @@ if __name__ == "__main__":
                 print(f"episode: {i+1}, score: {info['episode']['r']}")
 
 
-            dreamer.add(obs.flatten(), th.as_tensor(action), th.as_tensor(reward), done, is_first)
+            dreamer.add(obs.flatten(), action.flatten(), th.as_tensor([reward], dtype=th.float32), th.tensor([float(done)]), th.tensor([float(is_first)]))
             obs = next_obs
             is_first = False
     
@@ -82,7 +82,7 @@ if __name__ == "__main__":
 
             next_obs, reward, terminated, truncated, info = env.step(action.cpu().numpy().argmax())
             done = terminated or truncated
-            dreamer.add(obs.flatten(), th.as_tensor(action), th.as_tensor(reward), done, is_first)
+            dreamer.add(obs.flatten(), action.flatten(), th.as_tensor([reward], dtype=th.float32), th.tensor([float(done)]), th.tensor([float(is_first)]))
             is_first = False
 
             if done:

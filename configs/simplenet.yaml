@@ -1,20 +1,20 @@
 # training
 seed: 42
 logdir: runs
-episodes_before_start: 10
+episodes_before_start: 5
 grad_steps: 60000
-replay_ratio: 32
+replay_ratio: 16
 action_repeats: 1
-batch_size: 64
-batch_length: 16
-capacity: 25000
+batch_size: 16
+batch_length: 32
+capacity: 50000
 
-imagination_horizon: 15
-discount: 0.997
-gamma: 0.996996996996997
+imagination_horizon: 10
+discount: 0.99
+gamma: 0.99
 lmbda: 0.95
 unimix: 0.01
-free_nats: 1
+free_nats: 1.0
 entropyScale: 0.0003
 bins: 255
 reward_min: -20
@@ -29,20 +29,20 @@ recurrent_model:
 world_model:
 
   # optimizer
-  lr: 1e-4
-  b1: 0.99
+  lr: 3e-4
+  b1: 0.9
   b2: 0.999
 
 actor:
   num_layers: 2
   hidden_dim: 256
 
-  ent_coef: 3e-4 # 3e-4
+  ent_coef: 1e-3
 
   # optimizer 
   eps: 1e-5
-  lr: 8e-5 # 8e-5
-  b1: 0.99
+  lr: 3e-4
+  b1: 0.9
   b2: 0.999
 
 critic:
@@ -53,6 +53,6 @@ critic:
   tau: 0.02
 
   # optimizer
-  lr: 8e-5 # 8e-5
-  b1: 0.99
+  lr: 3e-4
+  b1: 0.9
   b2: 0.999
